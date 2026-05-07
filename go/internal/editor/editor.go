@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/hashicorp/hcl/v2"
@@ -332,6 +333,68 @@ func extractItemComments(body *hclwrite.Body, key string) map[string]itemComment
 	return result
 }
 
+// stableMergeList reorders infraItems so that items already present in the
+// config (existingItems) keep their original positions, with genuinely new
+// infra items appended at the end in infra order. This prevents churn when
+// the provider returns IDs in a different order than the config was written.
+// Only integer (float64) lists are reordered; other value types are returned
+// unchanged so string lists like include/exclude are unaffected.
+func stableMergeList(infraItems []interface{}, existingItems []string, repoIDs map[string]string) []interface{} {
+	// Build infra set: decimal ID string → original item value.
+	infraSet := make(map[string]interface{}, len(infraItems))
+	for _, item := range infraItems {
+		if f, ok := item.(float64); ok {
+			infraSet[strconv.FormatInt(int64(f), 10)] = item
+		}
+	}
+	if len(infraSet) == 0 {
+		return infraItems // not an integer list; don't reorder
+	}
+
+	// Build inverse: data source name → decimal ID string.
+	nameToID := make(map[string]string, len(repoIDs))
+	for id, name := range repoIDs {
+		nameToID[name] = id
+	}
+
+	// Walk existing config items in order; keep those still present in infra.
+	result := make([]interface{}, 0, len(infraItems))
+	emitted := make(map[string]bool, len(infraItems))
+	for _, existing := range existingItems {
+		id := resolveItemToID(existing, nameToID)
+		if id != "" && infraSet[id] != nil && !emitted[id] {
+			result = append(result, infraSet[id])
+			emitted[id] = true
+		}
+	}
+
+	// Append any infra items not already emitted (newly added repos).
+	for _, item := range infraItems {
+		if f, ok := item.(float64); ok {
+			id := strconv.FormatInt(int64(f), 10)
+			if !emitted[id] {
+				result = append(result, item)
+				emitted[id] = true
+			}
+		}
+	}
+	return result
+}
+
+// resolveItemToID converts an existing config item text to a decimal ID string.
+// Handles both "data.github_repository.mms.repo_id" (via nameToID) and bare
+// integer literals like "204896".
+func resolveItemToID(item string, nameToID map[string]string) string {
+	if name := parseGithubRepoRef(item); name != "" {
+		return nameToID[name]
+	}
+	item = strings.TrimSpace(item)
+	if id, err := strconv.ParseInt(item, 10, 64); err == nil {
+		return strconv.FormatInt(id, 10)
+	}
+	return ""
+}
+
 // setAttributeVal sets a scalar attribute on body. Lists with more than one
 // item are formatted one-item-per-line; everything else uses SetAttributeValue.
 // Existing comments are preserved; the hook (if set) provides comments for new values.
@@ -340,6 +403,12 @@ func setAttributeVal(body *hclwrite.Body, key string, val interface{}, ctx syncC
 		comments := extractItemComments(body, key)
 		existingItems := extractListItemTexts(body, key)
 		preferredRefs := buildPreferredRefs(existingItems, ctx.repoIDs)
+		// When we have repo ID context, apply stable ordering: keep existing
+		// config items in their original order, then append new infra items.
+		// This prevents churn from infra returning items in a different order.
+		if len(ctx.repoIDs) > 0 {
+			lst = stableMergeList(lst, existingItems, ctx.repoIDs)
+		}
 		toks, err := multilineListTokens(lst, comments, preferredRefs, ctx, path)
 		if err == nil {
 			body.SetAttributeRaw(key, toks)

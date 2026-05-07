@@ -655,3 +655,68 @@ resource "github_actions_organization_permissions" "_10gen" {
 		t.Errorf("bare integer 204896 should not appear (should be reference), got:\n%s", s)
 	}
 }
+
+// TestRepositoryIDOrderingPreserved verifies that existing config items keep
+// their original order, and new infra items are appended at the end — even
+// when the provider returns IDs in a different order than the config.
+func TestRepositoryIDOrderingPreserved(t *testing.T) {
+	// Config has: mms, mongo, new_repo in that order.
+	// Infra returns: new_repo, mongo, mms (reversed) plus two brand-new IDs.
+	// Expected output order: mms, mongo, new_repo (original order), then the
+	// two new IDs appended at the end.
+	input := `
+resource "github_actions_organization_permissions" "_10gen" {
+  enabled_repositories_config {
+    repository_ids = [
+      data.github_repository.mms.repo_id,
+      data.github_repository.mongo.repo_id,
+      data.github_repository.new_repo.repo_id,
+    ]
+  }
+}
+`
+	repoIDs := map[string]string{
+		"204896":  "mms",
+		"3473720": "mongo",
+		"99999":   "new_repo",
+	}
+
+	dir := t.TempDir()
+	fpath := filepath.Join(dir, "main.tf")
+	_ = os.WriteFile(fpath, []byte(input), 0644)
+
+	_, err := ApplyDrift(fpath, "github_actions_organization_permissions", "_10gen",
+		map[string]interface{}{
+			"enabled_repositories_config": map[string]interface{}{
+				// Infra order: reversed + two new IDs
+				"repository_ids": []interface{}{
+					float64(99999),
+					float64(3473720),
+					float64(204896),
+					float64(1111111),
+					float64(2222222),
+				},
+			},
+		},
+		false, nil, repoIDs)
+	if err != nil {
+		t.Fatalf("ApplyDrift: %v", err)
+	}
+	outBytes, _ := os.ReadFile(fpath)
+	s := string(outBytes)
+
+	// Ordering: mms before mongo, mongo before new_repo, new_repo before new IDs.
+	mmsIdx := strings.Index(s, "mms")
+	mongoIdx := strings.Index(s, "mongo")
+	newRepoIdx := strings.Index(s, "new_repo")
+	id1Idx := strings.Index(s, "1111111")
+	id2Idx := strings.Index(s, "2222222")
+
+	if mmsIdx < 0 || mongoIdx < 0 || newRepoIdx < 0 || id1Idx < 0 || id2Idx < 0 {
+		t.Fatalf("one or more expected items missing in output:\n%s", s)
+	}
+	if !(mmsIdx < mongoIdx && mongoIdx < newRepoIdx && newRepoIdx < id1Idx && id1Idx < id2Idx) {
+		t.Errorf("wrong order — want mms < mongo < new_repo < 1111111 < 2222222, got indices %d %d %d %d %d\n%s",
+			mmsIdx, mongoIdx, newRepoIdx, id1Idx, id2Idx, s)
+	}
+}
