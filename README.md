@@ -270,58 +270,6 @@ Using CLI binary: tofu
 | Variable | Default | Description |
 |---|---|---|
 | `DRIFT_FIXER_TF_BIN` | `tofu` | Terraform/OpenTofu binary to invoke |
-| `DRIFT_FIXER_COMMENT_SCRIPT` | *(unset)* | Path to a script that generates inline HCL comments (see [Comment Hook](#comment-hook)) |
-
----
-
-## Comment Hook
-
-When `DRIFT_FIXER_COMMENT_SCRIPT` is set, drift-fixer calls that script for
-every value it writes — both scalar attributes and individual list items. The
-script can print a comment body to stdout; drift-fixer will attach it as an
-inline `# comment` on that line.
-
-Existing comments in the file are **always preserved** and take priority over
-hook-generated comments. The hook only fires for values that have no existing
-comment.
-
-### Variables passed to the script
-
-| Variable | Example |
-|---|---|
-| `DRIFT_RESOURCE_TYPE` | `github_repository_ruleset` |
-| `DRIFT_RESOURCE_NAME` | `ruleset_main` |
-| `DRIFT_ATTR_PATH` | `conditions.ref_name.include` |
-| `DRIFT_ATTR_VALUE` | `"~DEFAULT_BRANCH"` *(rendered, so strings are quoted)* |
-
-### Script contract
-
-- Print a single line to **stdout** — the comment text, without `#`.
-- Print **nothing** (or exit non-zero) to add no comment.
-- Stderr is ignored (errors are logged in verbose mode only).
-
-### Example script
-
-```bash
-#!/usr/bin/env bash
-# Annotate GitHub branch patterns with a human-readable description
-
-case "$DRIFT_ATTR_VALUE" in
-  '"~DEFAULT_BRANCH"') echo "the default branch" ;;
-  '"~ALL"')            echo "all branches" ;;
-  '"refs/heads/releases/**/*"') echo "release branches" ;;
-esac
-```
-
-With this script active, a synced `include` list might look like:
-
-```hcl
-include = [
-  "~DEFAULT_BRANCH", # the default branch
-  "refs/heads/releases/**/*", # release branches
-  "refs/heads/meep",
-]
-```
 
 ---
 
@@ -507,7 +455,7 @@ drift-fixer/
         │   └── finder.go       # parses .tf AST to locate which file contains each resource
         └── editor/
             ├── editor.go               # hclwrite-based editor: ApplyDrift, RemoveResource, syncBody
-            ├── hook.go                 # CommentHook type + DRIFT_FIXER_COMMENT_SCRIPT loader
+            ├── hook.go                 # CommentHook type + built-in comment generators
             ├── editor_test.go          # core unit tests (18)
             └── editor_extended_test.go # extended GitHub provider tests (48)
 ```
@@ -549,5 +497,6 @@ drift-fixer/
 
 **`hook`**
 - `CommentHook` — function type `(rType, rName, path, value) → comment`.
-- `LoadCommentHook` — reads `DRIFT_FIXER_COMMENT_SCRIPT`; returns a hook that
-  exec's the script with context via env vars, or `nil` if unset.
+- `BuildRepoIDHook` — returns a hook that annotates `github_actions_organization_permissions`
+  `repository_ids` integer values with the corresponding `data.github_repository.<name>.repo_id`
+  reference, using repo ID metadata extracted from the plan's `prior_state`.

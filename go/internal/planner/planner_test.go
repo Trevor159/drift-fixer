@@ -42,7 +42,7 @@ func TestParsePlanJSON_AttributeDrift(t *testing.T) {
 			}
 		}]
 	}`)
-	drifts, err := parsePlanJSON(in)
+	drifts, _, err := parsePlanJSON(in)
 	if err != nil {
 		t.Fatalf("parsePlanJSON: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestParsePlanJSON_BoolBeforeSensitive(t *testing.T) {
 			}
 		}]
 	}`)
-	if _, err := parsePlanJSON(in); err != nil {
+	if _, _, err := parsePlanJSON(in); err != nil {
 		t.Fatalf("parsePlanJSON should accept bool before_sensitive/after_unknown, got: %v", err)
 	}
 }
@@ -106,7 +106,7 @@ func TestParsePlanJSON_BoolBeforeSensitiveTrue(t *testing.T) {
 			}
 		}]
 	}`)
-	drifts, err := parsePlanJSON(in)
+	drifts, _, err := parsePlanJSON(in)
 	if err != nil {
 		t.Fatalf("parsePlanJSON: %v", err)
 	}
@@ -132,7 +132,7 @@ func TestParsePlanJSON_PerAttrSensitiveFiltered(t *testing.T) {
 			}
 		}]
 	}`)
-	drifts, err := parsePlanJSON(in)
+	drifts, _, err := parsePlanJSON(in)
 	if err != nil {
 		t.Fatalf("parsePlanJSON: %v", err)
 	}
@@ -164,7 +164,7 @@ func TestParsePlanJSON_AfterUnknownSkipsAttr(t *testing.T) {
 			}
 		}]
 	}`)
-	drifts, err := parsePlanJSON(in)
+	drifts, _, err := parsePlanJSON(in)
 	if err != nil {
 		t.Fatalf("parsePlanJSON: %v", err)
 	}
@@ -204,7 +204,7 @@ func TestParsePlanJSON_DeletedInRealInfra(t *testing.T) {
 			"change": {"actions": ["delete"]}
 		}]
 	}`)
-	drifts, err := parsePlanJSON(in)
+	drifts, _, err := parsePlanJSON(in)
 	if err != nil {
 		t.Fatalf("parsePlanJSON: %v", err)
 	}
@@ -232,7 +232,7 @@ func TestParsePlanJSON_PostFixValidation(t *testing.T) {
 			"change": {"actions": ["delete"]}
 		}]
 	}`)
-	drifts, err := parsePlanJSON(in)
+	drifts, _, err := parsePlanJSON(in)
 	if err != nil {
 		t.Fatalf("parsePlanJSON: %v", err)
 	}
@@ -260,7 +260,7 @@ func TestParsePlanJSON_NewResourceNotDrift(t *testing.T) {
 		}],
 		"resource_drift": []
 	}`)
-	drifts, err := parsePlanJSON(in)
+	drifts, _, err := parsePlanJSON(in)
 	if err != nil {
 		t.Fatalf("parsePlanJSON: %v", err)
 	}
@@ -301,7 +301,7 @@ func TestParsePlanJSON_BlockListSupersetEmitted(t *testing.T) {
 			}
 		}]
 	}`)
-	drifts, err := parsePlanJSON(in)
+	drifts, _, err := parsePlanJSON(in)
 	if err != nil {
 		t.Fatalf("parsePlanJSON: %v", err)
 	}
@@ -345,7 +345,7 @@ func TestParsePlanJSON_BlockListExcessInConfigStillEmitted(t *testing.T) {
 			}
 		}]
 	}`)
-	drifts, err := parsePlanJSON(in)
+	drifts, _, err := parsePlanJSON(in)
 	if err != nil {
 		t.Fatalf("parsePlanJSON: %v", err)
 	}
@@ -354,6 +354,54 @@ func TestParsePlanJSON_BlockListExcessInConfigStillEmitted(t *testing.T) {
 	}
 	if _, ok := drifts[0].DriftedAttrs["bypass_actors"]; !ok {
 		t.Errorf("expected bypass_actors in DriftedAttrs, got %+v", drifts[0].DriftedAttrs)
+	}
+}
+
+// TestParsePlanJSON_RepoIDMap verifies that data.github_repository.* entries
+// in prior_state are extracted into the repo ID map so the editor can annotate
+// repository_ids list items with human-readable comments.
+func TestParsePlanJSON_RepoIDMap(t *testing.T) {
+	in := []byte(`{
+		"resource_changes": [],
+		"prior_state": {
+			"values": {
+				"root_module": {
+					"resources": [
+						{
+							"mode": "data",
+							"type": "github_repository",
+							"name": "mms",
+							"values": {"repo_id": 204896}
+						},
+						{
+							"mode": "data",
+							"type": "github_repository",
+							"name": "mongo",
+							"values": {"repo_id": 3473720}
+						},
+						{
+							"mode": "managed",
+							"type": "github_repository",
+							"name": "should_be_ignored",
+							"values": {"repo_id": 9999999}
+						}
+					]
+				}
+			}
+		}
+	}`)
+	_, repoIDs, err := parsePlanJSON(in)
+	if err != nil {
+		t.Fatalf("parsePlanJSON: %v", err)
+	}
+	if got := repoIDs["204896"]; got != "mms" {
+		t.Errorf("repoIDs[204896] = %q, want %q", got, "mms")
+	}
+	if got := repoIDs["3473720"]; got != "mongo" {
+		t.Errorf("repoIDs[3473720] = %q, want %q", got, "mongo")
+	}
+	if _, ok := repoIDs["9999999"]; ok {
+		t.Errorf("managed resource should not appear in repoIDs map")
 	}
 }
 
@@ -374,7 +422,7 @@ func TestParsePlanJSON_NoOpNoDrift(t *testing.T) {
 			}
 		}]
 	}`)
-	drifts, err := parsePlanJSON(in)
+	drifts, _, err := parsePlanJSON(in)
 	if err != nil {
 		t.Fatalf("parsePlanJSON: %v", err)
 	}

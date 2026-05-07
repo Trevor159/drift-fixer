@@ -71,12 +71,19 @@ func removeImportsTargeting(body *hclwrite.Body, rType, rName string) {
 // individual functions do not need long parameter lists.
 type syncCtx struct {
 	verbose bool
-	rType   string      // resource type, e.g. "github_repository_ruleset"
-	rName   string      // resource name, e.g. "ruleset_15577636"
-	hook    CommentHook // may be nil
+	rType   string            // resource type, e.g. "github_repository_ruleset"
+	rName   string            // resource name, e.g. "ruleset_15577636"
+	hook    CommentHook       // may be nil
+	repoIDs map[string]string // decimal repo ID → data source name, from plan prior_state
 }
 
-func ApplyDrift(filePath, resourceType, resourceName string, driftedAttrs map[string]interface{}, verbose bool, hook CommentHook) (bool, error) {
+// ApplyDrift reads filePath, applies the drifted attribute values for the
+// resource identified by (resourceType, resourceName), and writes it back.
+// repoIDs maps decimal repository integer IDs to data source names (e.g.
+// "204896" → "mms") so that existing data.github_repository.* reference
+// expressions in repository_ids lists are preserved instead of being
+// replaced with bare integers. Pass nil if not applicable.
+func ApplyDrift(filePath, resourceType, resourceName string, driftedAttrs map[string]interface{}, verbose bool, hook CommentHook, repoIDs map[string]string) (bool, error) {
 	src, err := os.ReadFile(filePath)
 	if err != nil {
 		return false, fmt.Errorf("read %s: %w", filePath, err)
@@ -92,7 +99,7 @@ func ApplyDrift(filePath, resourceType, resourceName string, driftedAttrs map[st
 		return false, fmt.Errorf("resource %q %q not found in %s", resourceType, resourceName, filePath)
 	}
 
-	ctx := syncCtx{verbose: verbose, rType: resourceType, rName: resourceName, hook: hook}
+	ctx := syncCtx{verbose: verbose, rType: resourceType, rName: resourceName, hook: hook, repoIDs: repoIDs}
 	changed := syncBody(resourceBlock.Body(), driftedAttrs, ctx, "  ", "")
 	if !changed {
 		return false, nil
@@ -331,7 +338,9 @@ func extractItemComments(body *hclwrite.Body, key string) map[string]itemComment
 func setAttributeVal(body *hclwrite.Body, key string, val interface{}, ctx syncCtx, path string) error {
 	if lst, ok := val.([]interface{}); ok && len(lst) > 1 {
 		comments := extractItemComments(body, key)
-		toks, err := multilineListTokens(lst, comments, ctx, path)
+		existingItems := extractListItemTexts(body, key)
+		preferredRefs := buildPreferredRefs(existingItems, ctx.repoIDs)
+		toks, err := multilineListTokens(lst, comments, preferredRefs, ctx, path)
 		if err == nil {
 			body.SetAttributeRaw(key, toks)
 			return nil
@@ -370,8 +379,10 @@ func setAttributeVal(body *hclwrite.Body, key string, val interface{}, ctx syncC
 //
 // Existing comments (from extractItemComments) are preserved. For list items
 // that have no existing comment, the hook (if set) is asked for one.
+// preferredRefs maps an integer literal string to the reference expression
+// that should be emitted in its place (e.g. "204896" → "data.github_repository.mms.repo_id").
 // path is the dot-separated attribute path of the list itself.
-func multilineListTokens(items []interface{}, comments map[string]itemComment, ctx syncCtx, path string) (hclwrite.Tokens, error) {
+func multilineListTokens(items []interface{}, comments map[string]itemComment, preferredRefs map[string]string, ctx syncCtx, path string) (hclwrite.Tokens, error) {
 	tok := func(t hclsyntax.TokenType, b string) *hclwrite.Token {
 		return &hclwrite.Token{Type: t, Bytes: []byte(b)}
 	}
@@ -384,16 +395,29 @@ func multilineListTokens(items []interface{}, comments map[string]itemComment, c
 		if err != nil {
 			return nil, err
 		}
-		valToks := hclwrite.TokensForValue(ctyVal)
-		var keyBuf []byte
-		for _, vt := range valToks {
-			keyBuf = append(keyBuf, vt.Bytes...)
+		litToks := hclwrite.TokensForValue(ctyVal)
+		var litBuf []byte
+		for _, vt := range litToks {
+			litBuf = append(litBuf, vt.Bytes...)
 		}
-		valKey := strings.TrimSpace(string(keyBuf))
-		c := comments[valKey]
-		// If no existing inline comment and hook is set, ask for one.
-		if c.inline == nil && ctx.hook != nil {
-			if hookComment := ctx.hook(ctx.rType, ctx.rName, path, valKey); hookComment != "" {
+		litKey := strings.TrimSpace(string(litBuf))
+
+		// If the current config has a reference expression for this value,
+		// emit it instead of the bare literal. References are self-documenting
+		// so we skip the hook for them.
+		emitToks := litToks
+		commentKey := litKey
+		isRef := false
+		if ref, ok := preferredRefs[litKey]; ok {
+			emitToks = buildRefTokens(ref)
+			commentKey = ref
+			isRef = true
+		}
+
+		c := comments[commentKey]
+		// For literal items with no existing inline comment, ask the hook.
+		if c.inline == nil && !isRef && ctx.hook != nil {
+			if hookComment := ctx.hook(ctx.rType, ctx.rName, path, litKey); hookComment != "" {
 				ct := &hclwrite.Token{
 					Type:  hclsyntax.TokenComment,
 					Bytes: []byte(" # " + hookComment + "\n"),
@@ -403,8 +427,8 @@ func multilineListTokens(items []interface{}, comments map[string]itemComment, c
 		}
 		// Emit any preceding-line comments.
 		toks = append(toks, c.before...)
-		// Emit the value itself.
-		toks = append(toks, valToks...)
+		// Emit the value (reference or literal).
+		toks = append(toks, emitToks...)
 		// Emit comma; if there's an inline comment it carries its own trailing
 		// newline in its bytes, so skip our explicit newline in that case.
 		toks = append(toks, tok(hclsyntax.TokenComma, ","))
@@ -416,6 +440,103 @@ func multilineListTokens(items []interface{}, comments map[string]itemComment, c
 	}
 	toks = append(toks, tok(hclsyntax.TokenCBrack, "]"))
 	return toks, nil
+}
+
+// extractListItemTexts returns the trimmed text of every value in the named
+// list attribute on body. Comments and newlines are skipped so that reference
+// expressions like "data.github_repository.mms.repo_id" are returned as-is.
+func extractListItemTexts(body *hclwrite.Body, key string) []string {
+	attr := body.GetAttribute(key)
+	if attr == nil {
+		return nil
+	}
+	exprToks := attr.Expr().BuildTokens(nil)
+	var result []string
+	inList := false
+	var valueBuf []byte
+	for _, t := range exprToks {
+		switch t.Type {
+		case hclsyntax.TokenOBrack:
+			inList = true
+		case hclsyntax.TokenCBrack:
+			if s := strings.TrimSpace(string(valueBuf)); s != "" {
+				result = append(result, s)
+			}
+			inList = false
+		case hclsyntax.TokenComma:
+			if inList {
+				if s := strings.TrimSpace(string(valueBuf)); s != "" {
+					result = append(result, s)
+				}
+				valueBuf = nil
+			}
+		case hclsyntax.TokenComment, hclsyntax.TokenNewline:
+			// skip
+		default:
+			if inList {
+				valueBuf = append(valueBuf, t.Bytes...)
+			}
+		}
+	}
+	return result
+}
+
+// buildPreferredRefs builds a map of integer ID string → reference expression
+// for any data.github_repository.* items found in existingItems, using repoIDs
+// (decimal ID → data source name) to resolve the integer for each reference.
+// E.g. if existingItems contains "data.github_repository.mms.repo_id" and
+// repoIDs["204896"] == "mms", the result has "204896" → "data.github_repository.mms.repo_id".
+func buildPreferredRefs(existingItems []string, repoIDs map[string]string) map[string]string {
+	if len(repoIDs) == 0 || len(existingItems) == 0 {
+		return nil
+	}
+	// Inverse: data source name → decimal ID string
+	nameToID := make(map[string]string, len(repoIDs))
+	for id, name := range repoIDs {
+		nameToID[name] = id
+	}
+	refs := make(map[string]string)
+	for _, item := range existingItems {
+		name := parseGithubRepoRef(item)
+		if name == "" {
+			continue
+		}
+		if id, ok := nameToID[name]; ok {
+			refs[id] = item
+		}
+	}
+	if len(refs) == 0 {
+		return nil
+	}
+	return refs
+}
+
+// parseGithubRepoRef extracts the data source name from a reference of the
+// form "data.github_repository.<name>.repo_id", or returns "".
+func parseGithubRepoRef(text string) string {
+	const prefix = "data.github_repository."
+	const suffix = ".repo_id"
+	if strings.HasPrefix(text, prefix) && strings.HasSuffix(text, suffix) {
+		name := text[len(prefix) : len(text)-len(suffix)]
+		if name != "" && !strings.Contains(name, ".") {
+			return name
+		}
+	}
+	return ""
+}
+
+// buildRefTokens converts a dotted reference string like
+// "data.github_repository.mms.repo_id" into hclwrite identifier tokens.
+func buildRefTokens(ref string) hclwrite.Tokens {
+	parts := strings.Split(ref, ".")
+	toks := hclwrite.Tokens{}
+	for i, part := range parts {
+		if i > 0 {
+			toks = append(toks, &hclwrite.Token{Type: hclsyntax.TokenDot, Bytes: []byte(".")})
+		}
+		toks = append(toks, &hclwrite.Token{Type: hclsyntax.TokenIdent, Bytes: []byte(part)})
+	}
+	return toks
 }
 
 // toBlockItems returns all map instances from a block value (map or list-of-maps).

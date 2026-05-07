@@ -24,17 +24,17 @@ func main() {
 		fatalf("resolve path: %v", err)
 	}
 
-	hook := editor.LoadCommentHook(*verbose)
-
 	fmt.Printf("Starting drift analysis in: %s\n", projectDir)
 	fmt.Printf("Using CLI binary: %s\n", *tfBin)
 
 	// Step 1: Run plan and find drifted resources
 	fmt.Println("🔍 Running plan to detect drift...")
-	drifts, err := planner.Run(projectDir, *tfBin, *verbose)
+	drifts, repoIDs, err := planner.Run(projectDir, *tfBin, *verbose)
 	if err != nil {
 		fatalf("plan: %v", err)
 	}
+
+	hook := editor.BuildRepoIDHook(repoIDs)
 	if len(drifts) == 0 {
 		fmt.Println("✅ No drift detected.")
 		return
@@ -95,7 +95,7 @@ func main() {
 				fmt.Printf("\n  Syncing %s in %s\n", addr, relPath)
 				fmt.Printf("  Drifted attrs: %s\n", keys(d.DriftedAttrs))
 			}
-			changed, err := editor.ApplyDrift(filePath, d.ResourceType, d.ResourceName, d.DriftedAttrs, *verbose, hook)
+			changed, err := editor.ApplyDrift(filePath, d.ResourceType, d.ResourceName, d.DriftedAttrs, *verbose, hook, repoIDs)
 			if err != nil {
 				fmt.Printf("  ❌ %s: %v\n", addr, err)
 				allFixed = false
@@ -115,7 +115,7 @@ func main() {
 
 	// Step 4: Validate
 	fmt.Println("\n✅ Validating...")
-	postDrifts, err := planner.Run(projectDir, *tfBin, false)
+	postDrifts, _, err := planner.Run(projectDir, *tfBin, false)
 	if err != nil {
 		fatalf("validation plan: %v", err)
 	}

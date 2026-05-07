@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 )
 
 // ResourceDrift holds the drifted before-values for one resource.
@@ -23,11 +24,13 @@ type ResourceDrift struct {
 }
 
 // Run runs `tofu plan -out <tmp>` + `tofu show -json <tmp>` in projectDir and
-// returns one ResourceDrift per resource that has real drift (before != after).
-func Run(projectDir, tfBin string, verbose bool) ([]ResourceDrift, error) {
+// returns one ResourceDrift per resource that has real drift (before != after),
+// plus a map of repository ID (as decimal string) → data source name extracted
+// from the plan's prior_state (used to annotate repository_ids lists).
+func Run(projectDir, tfBin string, verbose bool) ([]ResourceDrift, map[string]string, error) {
 	f, err := os.CreateTemp("", "drift-*.tfplan")
 	if err != nil {
-		return nil, fmt.Errorf("create tmpfile: %w", err)
+		return nil, nil, fmt.Errorf("create tmpfile: %w", err)
 	}
 	planFile := f.Name()
 	f.Close()
@@ -41,23 +44,25 @@ func Run(projectDir, tfBin string, verbose bool) ([]ResourceDrift, error) {
 	}
 	// exit 0 = no changes, exit 2 = changes; anything else is an error
 	if code := planCmd.ProcessState.ExitCode(); code != 0 && code != 2 {
-		return nil, fmt.Errorf("tofu plan failed (exit %d):\n%s", code, string(planOut))
+		return nil, nil, fmt.Errorf("tofu plan failed (exit %d):\n%s", code, string(planOut))
 	}
 
 	showCmd := exec.Command(tfBin, "show", "-json", planFile)
 	showCmd.Dir = projectDir
 	showOut, err := showCmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("tofu show -json: %w", err)
+		return nil, nil, fmt.Errorf("tofu show -json: %w", err)
 	}
 
 	return parsePlanJSON(showOut)
 }
 
 // parsePlanJSON extracts ResourceDrift entries from the JSON output of
-// `tofu show -json <plan>`. Split out from Run so it can be unit-tested
-// without invoking tofu.
-func parsePlanJSON(showOut []byte) ([]ResourceDrift, error) {
+// `tofu show -json <plan>`. Also returns a map of repository integer ID
+// (as decimal string) → data source name built from prior_state, used to
+// annotate repository_ids list items with human-readable comments.
+// Split out from Run so it can be unit-tested without invoking tofu.
+func parsePlanJSON(showOut []byte) ([]ResourceDrift, map[string]string, error) {
 	// before_sensitive and after_unknown are polymorphic in Terraform/OpenTofu
 	// plan JSON: a bool when the entire resource value is (un)sensitive/known,
 	// an object when there is per-attribute info. Decode as interface{} and
@@ -87,9 +92,36 @@ func parsePlanJSON(showOut []byte) ([]ResourceDrift, error) {
 				Actions []string `json:"actions"`
 			} `json:"change"`
 		} `json:"resource_drift"`
+		// prior_state carries the resolved values of all resources (including
+		// data sources) as of the last refresh. We mine it for
+		// data.github_repository.* repo_id values so we can annotate raw
+		// integer IDs written into repository_ids lists.
+		PriorState struct {
+			Values struct {
+				RootModule struct {
+					Resources []struct {
+						Mode   string                 `json:"mode"`
+						Type   string                 `json:"type"`
+						Name   string                 `json:"name"`
+						Values map[string]interface{} `json:"values"`
+					} `json:"resources"`
+				} `json:"root_module"`
+			} `json:"values"`
+		} `json:"prior_state"`
 	}
 	if err := json.Unmarshal(showOut, &planJSON); err != nil {
-		return nil, fmt.Errorf("parse plan JSON: %w", err)
+		return nil, nil, fmt.Errorf("parse plan JSON: %w", err)
+	}
+
+	// Build repo ID → data source name map from prior_state.
+	repoIDs := make(map[string]string)
+	for _, r := range planJSON.PriorState.Values.RootModule.Resources {
+		if r.Mode != "data" || r.Type != "github_repository" {
+			continue
+		}
+		if id, ok := r.Values["repo_id"].(float64); ok {
+			repoIDs[strconv.FormatInt(int64(id), 10)] = r.Name
+		}
 	}
 
 	var drifts []ResourceDrift
@@ -190,7 +222,7 @@ func parsePlanJSON(showOut []byte) ([]ResourceDrift, error) {
 			}
 		}
 	}
-	return drifts, nil
+	return drifts, repoIDs, nil
 }
 
 // isSensitive reports whether attribute key in a resource's before-state is

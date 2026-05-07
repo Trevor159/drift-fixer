@@ -16,7 +16,7 @@ func applyDriftToString(t *testing.T, inputHCL string, rType, rName string, drif
 	if err := os.WriteFile(path, []byte(inputHCL), 0644); err != nil {
 		t.Fatalf("write temp file: %v", err)
 	}
-	_, err := ApplyDrift(path, rType, rName, drifted, false, nil)
+	_, err := ApplyDrift(path, rType, rName, drifted, false, nil, nil)
 	if err != nil {
 		t.Fatalf("ApplyDrift: %v", err)
 	}
@@ -505,7 +505,7 @@ resource "example_resource" "r" {
 	_, err := ApplyDrift(fpath, "example_resource", "r", map[string]interface{}{
 		"name": "new",
 		"tags": []interface{}{"a", "b"},
-	}, false, hook)
+	}, false, hook, nil)
 	if err != nil {
 		t.Fatalf("ApplyDrift: %v", err)
 	}
@@ -590,5 +590,68 @@ resource "example_resource" "r" {
 	beforeBIdx := strings.Index(out, "# before B")
 	if beforeBIdx < aIdx {
 		t.Errorf("expected '# before B' after line with A, got:\n%s", out)
+	}
+}
+
+// TestRepositoryIDReferencesPreserved verifies that when a repository_ids list
+// already uses data.github_repository.* references in the config, those
+// references are kept instead of being replaced with bare integer literals.
+// New IDs that have no existing reference get an integer literal (with a
+// comment from the built-in hook if repoIDs is provided).
+func TestRepositoryIDReferencesPreserved(t *testing.T) {
+	input := `
+resource "github_actions_organization_permissions" "_10gen" {
+  enabled_repositories = "selected"
+  enabled_repositories_config {
+    repository_ids = [
+      data.github_repository.mms.repo_id,
+      data.github_repository.mongo.repo_id,
+    ]
+  }
+}
+`
+	// Infra now has three repos: mms and mongo are still there (same IDs),
+	// plus a newly-added repo with ID 99999.
+	repoIDs := map[string]string{
+		"204896":  "mms",
+		"3473720": "mongo",
+		"99999":   "new_repo",
+	}
+
+	dir := t.TempDir()
+	fpath := filepath.Join(dir, "main.tf")
+	_ = os.WriteFile(fpath, []byte(input), 0644)
+
+	_, err := ApplyDrift(fpath, "github_actions_organization_permissions", "_10gen",
+		map[string]interface{}{
+			"enabled_repositories_config": map[string]interface{}{
+				"repository_ids": []interface{}{
+					float64(204896),
+					float64(3473720),
+					float64(99999),
+				},
+			},
+		},
+		false, nil, repoIDs)
+	if err != nil {
+		t.Fatalf("ApplyDrift: %v", err)
+	}
+	outBytes, _ := os.ReadFile(fpath)
+	s := string(outBytes)
+
+	// Existing references must be preserved.
+	if !strings.Contains(s, "data.github_repository.mms.repo_id") {
+		t.Errorf("mms reference should be preserved, got:\n%s", s)
+	}
+	if !strings.Contains(s, "data.github_repository.mongo.repo_id") {
+		t.Errorf("mongo reference should be preserved, got:\n%s", s)
+	}
+	// New ID that had no reference in config should appear as an integer.
+	if !strings.Contains(s, "99999") {
+		t.Errorf("new repo ID 99999 should be present, got:\n%s", s)
+	}
+	// The bare integer 204896 should NOT appear (replaced by reference).
+	if strings.Contains(s, "204896") {
+		t.Errorf("bare integer 204896 should not appear (should be reference), got:\n%s", s)
 	}
 }

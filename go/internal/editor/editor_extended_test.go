@@ -24,7 +24,7 @@ func applyDriftNoChange(t *testing.T, inputHCL string, rType, rName string, drif
 	if err := os.WriteFile(path, []byte(inputHCL), 0644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	changed, err := ApplyDrift(path, rType, rName, drifted, false, nil)
+	changed, err := ApplyDrift(path, rType, rName, drifted, false, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -289,7 +289,7 @@ resource "github_repository" "repo" {
 	_ = os.WriteFile(path, []byte(input), 0644)
 	_, err := ApplyDrift(path, "github_repository", "nonexistent", map[string]interface{}{
 		"description": "x",
-	}, false, nil)
+	}, false, nil, nil)
 	if err == nil {
 		t.Error("expected error for missing resource, got nil")
 	}
@@ -1115,7 +1115,7 @@ resource "example_resource" "r" {
 	_ = os.WriteFile(fpath, []byte(input), 0644)
 	_, err := ApplyDrift(fpath, "example_resource", "r",
 		map[string]interface{}{"tags": []interface{}{"alpha", "beta", "gamma"}},
-		false, hook)
+		false, hook, nil)
 	if err != nil {
 		t.Fatalf("ApplyDrift: %v", err)
 	}
@@ -1170,7 +1170,7 @@ resource "github_repository_ruleset" "rs" {
 				},
 			},
 		},
-		false, hook)
+		false, hook, nil)
 	if err != nil {
 		t.Fatalf("ApplyDrift: %v", err)
 	}
