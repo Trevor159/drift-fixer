@@ -270,6 +270,79 @@ Using CLI binary: tofu
 | Variable | Default | Description |
 |---|---|---|
 | `DRIFT_FIXER_TF_BIN` | `tofu` | Terraform/OpenTofu binary to invoke |
+| `DRIFT_FIXER_COMMENT_SCRIPT` | *(unset)* | Path to an executable script that generates inline HCL comments (see [Comment Hook](#comment-hook)) |
+
+---
+
+## Comment Hook
+
+When `DRIFT_FIXER_COMMENT_SCRIPT` is set, drift-fixer can annotate written
+values with inline `# comments`. The script is invoked once per value that
+needs a comment.
+
+### How it works
+
+drift-fixer uses a two-pass approach:
+
+1. **Pass 1 — write the fix.** The resource is written to disk with all drift
+   corrections applied and all existing comments preserved. No script is called
+   yet.
+2. **Pass 2 — annotate.** For each value in the drifted resource that has no
+   existing comment, the script is called. Only the resources that had drift are
+   processed — the rest of the file is untouched. Because the file has already
+   been written, the script can read it to use surrounding context when deciding
+   what comment to generate.
+
+**Existing inline comments are always preserved** and take priority over
+script-generated ones — the script is never called for a value that already
+has a comment.
+
+Built-in comment logic (e.g. annotating `repository_ids` entries with their
+`data.github_repository.*` reference) runs in pass 1 and also suppresses the
+script for those values.
+
+### Variables passed to the script
+
+| Variable | Example | Description |
+|---|---|---|
+| `DRIFT_RESOURCE_TYPE` | `github_repository_ruleset` | Terraform resource type |
+| `DRIFT_RESOURCE_NAME` | `ruleset_main` | Terraform resource name |
+| `DRIFT_ATTR_PATH` | `conditions.ref_name.include` | Dot-separated attribute path |
+| `DRIFT_ATTR_VALUE` | `"~DEFAULT_BRANCH"` | Rendered value (strings are quoted) |
+| `DRIFT_FILE_PATH` | `/path/to/main.tf` | Absolute path of the file already written to disk |
+
+All environment variables from the parent process (including `GITHUB_TOKEN`,
+`GITHUB_WORKSPACE`, etc.) are also inherited.
+
+### Script contract
+
+- Print a single line to **stdout** — the comment text, without `#`.
+- Print **nothing** (or exit non-zero) to add no comment.
+- Stderr is captured and shown on error (or in verbose mode).
+
+### Example script
+
+```bash
+#!/usr/bin/env bash
+# Annotate GitHub branch patterns with a human-readable description.
+# $DRIFT_FILE_PATH is available if you need to read the full config for context.
+
+case "$DRIFT_ATTR_VALUE" in
+  '"~DEFAULT_BRANCH"') echo "the default branch" ;;
+  '"~ALL"')            echo "all branches" ;;
+  '"refs/heads/releases/**/*"') echo "release branches" ;;
+esac
+```
+
+With this script active, a synced `include` list might look like:
+
+```hcl
+include = [
+  "~DEFAULT_BRANCH", # the default branch
+  "refs/heads/releases/**/*", # release branches
+  "refs/heads/meep",
+]
+```
 
 ---
 
@@ -376,8 +449,9 @@ GitHub provider has been the primary test target.
 - **`for_each` / `count` meta-arguments** — resources managed with `count` or
   `for_each` are located by address label. The tool edits the block body directly;
   it does not currently modify the `count` or `for_each` expression itself.
-- **Comment hook is synchronous** — the script is exec'd once per value written.
-  For large syncs with many list items, a slow script will slow the overall run.
+- **Comment hook is synchronous** — the script is exec'd once per value that
+  needs a comment (pass 2 only). Values with existing comments are skipped.
+  For large syncs with many uncommented list items, a slow script will slow the overall run.
 
 ---
 
@@ -496,7 +570,7 @@ drift-fixer/
   re-inserting preserved comments and hook-generated comments in the right spots.
 
 **`hook`**
-- `CommentHook` — function type `(rType, rName, path, value) → comment`.
-- `BuildRepoIDHook` — returns a hook that annotates `github_actions_organization_permissions`
-  `repository_ids` integer values with the corresponding `data.github_repository.<name>.repo_id`
-  reference, using repo ID metadata extracted from the plan's `prior_state`.
+- `CommentHook` — function type `(rType, rName, path, value, filePath) → comment`.
+- `LoadCommentHook` — reads `DRIFT_FIXER_COMMENT_SCRIPT`; returns a hook that exec's the script
+  with context via env vars (including `DRIFT_FILE_PATH`), or `nil` if unset.
+- `ComposeHooks` — chains two hooks; tries primary first, falls back to secondary.

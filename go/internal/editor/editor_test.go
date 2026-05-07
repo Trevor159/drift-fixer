@@ -484,7 +484,7 @@ resource "example_resource" "r" {
   tags = ["a"]
 }
 `
-	hook := func(rType, rName, path, value string) string {
+	hook := func(rType, rName, path, value, _ string) string {
 		if rType != "example_resource" || rName != "r" {
 			return ""
 		}

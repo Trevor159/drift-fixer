@@ -71,11 +71,12 @@ func removeImportsTargeting(body *hclwrite.Body, rType, rName string) {
 // syncCtx carries per-run context through syncBody and its helpers so that
 // individual functions do not need long parameter lists.
 type syncCtx struct {
-	verbose bool
-	rType   string            // resource type, e.g. "github_repository_ruleset"
-	rName   string            // resource name, e.g. "ruleset_15577636"
-	hook    CommentHook       // may be nil
-	repoIDs map[string]string // decimal repo ID → data source name, from plan prior_state
+	verbose  bool
+	rType    string            // resource type, e.g. "github_repository_ruleset"
+	rName    string            // resource name, e.g. "ruleset_15577636"
+	filePath string            // absolute path of the .tf file being edited
+	hook     CommentHook       // may be nil
+	repoIDs  map[string]string // decimal repo ID → data source name, from plan prior_state
 }
 
 // ApplyDrift reads filePath, applies the drifted attribute values for the
@@ -100,7 +101,7 @@ func ApplyDrift(filePath, resourceType, resourceName string, driftedAttrs map[st
 		return false, fmt.Errorf("resource %q %q not found in %s", resourceType, resourceName, filePath)
 	}
 
-	ctx := syncCtx{verbose: verbose, rType: resourceType, rName: resourceName, hook: hook, repoIDs: repoIDs}
+	ctx := syncCtx{verbose: verbose, rType: resourceType, rName: resourceName, filePath: filePath, hook: hook, repoIDs: repoIDs}
 	changed := syncBody(resourceBlock.Body(), driftedAttrs, ctx, "  ", "")
 	if !changed {
 		return false, nil
@@ -427,7 +428,7 @@ func setAttributeVal(body *hclwrite.Body, key string, val interface{}, ctx syncC
 		for _, vt := range valToks {
 			keyBuf = append(keyBuf, vt.Bytes...)
 		}
-		if comment := ctx.hook(ctx.rType, ctx.rName, path, strings.TrimSpace(string(keyBuf))); comment != "" {
+		if comment := ctx.hook(ctx.rType, ctx.rName, path, strings.TrimSpace(string(keyBuf)), ctx.filePath); comment != "" {
 			body.SetAttributeRaw(key, append(valToks,
 				&hclwrite.Token{Type: hclsyntax.TokenComment, Bytes: []byte(" # " + comment + "\n")},
 			))
@@ -486,7 +487,7 @@ func multilineListTokens(items []interface{}, comments map[string]itemComment, p
 		c := comments[commentKey]
 		// For literal items with no existing inline comment, ask the hook.
 		if c.inline == nil && !isRef && ctx.hook != nil {
-			if hookComment := ctx.hook(ctx.rType, ctx.rName, path, litKey); hookComment != "" {
+			if hookComment := ctx.hook(ctx.rType, ctx.rName, path, litKey, ctx.filePath); hookComment != "" {
 				ct := &hclwrite.Token{
 					Type:  hclsyntax.TokenComment,
 					Bytes: []byte(" # " + hookComment + "\n"),

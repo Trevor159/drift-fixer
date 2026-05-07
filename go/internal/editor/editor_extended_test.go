@@ -1106,7 +1106,7 @@ resource "example_resource" "r" {
   ]
 }
 `
-	hook := func(_, _, _, value string) string {
+	hook := func(_, _, _, value, _ string) string {
 		return "hook comment for " + value
 	}
 
@@ -1144,7 +1144,7 @@ resource "example_resource" "r" {
 func TestCommentHookAttrPath(t *testing.T) {
 	// Verify the path passed to the hook reflects the actual attr hierarchy.
 	var capturedPaths []string
-	hook := func(_, _, path, _ string) string {
+	hook := func(_, _, path, _, _ string) string {
 		capturedPaths = append(capturedPaths, path)
 		return ""
 	}

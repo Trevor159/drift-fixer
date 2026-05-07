@@ -34,7 +34,7 @@ func main() {
 		fatalf("plan: %v", err)
 	}
 
-	hook := editor.BuildRepoIDHook(repoIDs)
+	scriptHook := editor.LoadCommentHook(*verbose)
 	if len(drifts) == 0 {
 		fmt.Println("✅ No drift detected.")
 		return
@@ -95,11 +95,20 @@ func main() {
 				fmt.Printf("\n  Syncing %s in %s\n", addr, relPath)
 				fmt.Printf("  Drifted attrs: %s\n", keys(d.DriftedAttrs))
 			}
-			changed, err := editor.ApplyDrift(filePath, d.ResourceType, d.ResourceName, d.DriftedAttrs, *verbose, hook, repoIDs)
+			// Pass 1: write the fix without comments so the script can read
+			// the updated file for context in pass 2.
+			changed, err := editor.ApplyDrift(filePath, d.ResourceType, d.ResourceName, d.DriftedAttrs, *verbose, nil, repoIDs)
 			if err != nil {
 				fmt.Printf("  ❌ %s: %v\n", addr, err)
 				allFixed = false
 				continue
+			}
+			// Pass 2: apply script-generated comments (file already written).
+			if scriptHook != nil {
+				_, err = editor.ApplyDrift(filePath, d.ResourceType, d.ResourceName, d.DriftedAttrs, *verbose, scriptHook, repoIDs)
+				if err != nil {
+					fmt.Printf("  ❌ %s (comment pass): %v\n", addr, err)
+				}
 			}
 			if changed {
 				fmt.Printf("  ✅ Fixed %s in %s\n", addr, relPath)
