@@ -149,6 +149,14 @@ runs:
           echo "drift-detected=true" >> "$GITHUB_OUTPUT"
         fi
 
+    - name: Format Terraform files
+      if: steps.run.outputs.drift-detected == 'true'
+      shell: bash
+      working-directory: ${{ inputs.path }}
+      env:
+        TF_BIN: ${{ inputs.tf-bin }}
+      run: "$TF_BIN fmt"
+
     - name: Commit directly
       if: inputs.mode == 'commit' && steps.run.outputs.drift-detected == 'true'
       shell: bash
