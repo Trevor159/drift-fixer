@@ -36,7 +36,7 @@ func Run(projectDir, tfBin string, verbose bool) ([]ResourceDrift, map[string]st
 	f.Close()
 	defer os.Remove(planFile)
 
-	planCmd := exec.Command(tfBin, "plan", "-out", planFile, "-no-color")
+	planCmd := exec.Command(tfBin, "plan", "-out", planFile, "-no-color", "-lock=false")
 	planCmd.Dir = projectDir
 	planOut, err := planCmd.CombinedOutput()
 	if verbose {
