@@ -43,6 +43,10 @@ inputs:
     description: Open the pull request as a draft (true) or ready-for-review (false).
     required: false
     default: "true"
+  commit-branch:
+    description: Branch to push to when mode is 'commit'. Defaults to the currently checked-out branch.
+    required: false
+    default: ""
   commit-message:
     description: Commit message used for both 'commit' and 'pr' modes.
     required: false
@@ -167,7 +171,12 @@ runs:
         git config user.email "${{ inputs.git-user-email }}"
         git add -A
         git commit -m "${{ inputs.commit-message }}"
-        git push
+        COMMIT_BRANCH="${{ inputs.commit-branch }}"
+        if [ -n "$COMMIT_BRANCH" ]; then
+          git push origin "HEAD:$COMMIT_BRANCH"
+        else
+          git push
+        fi
 
     - name: Open pull request
       id: pr
