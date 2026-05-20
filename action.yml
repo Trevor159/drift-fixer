@@ -173,7 +173,13 @@ runs:
         git commit -m "${{ inputs.commit-message }}"
         COMMIT_BRANCH="${{ inputs.commit-branch }}"
         if [ -n "$COMMIT_BRANCH" ]; then
+          DRIFT_COMMIT=$(git rev-parse HEAD)
+          git fetch origin "$COMMIT_BRANCH"
+          git checkout -b _drift_fixer_tmp "origin/$COMMIT_BRANCH"
+          git cherry-pick "$DRIFT_COMMIT"
           git push origin "HEAD:$COMMIT_BRANCH"
+          git checkout -
+          git branch -D _drift_fixer_tmp
         else
           git push
         fi
