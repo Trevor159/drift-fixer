@@ -258,6 +258,33 @@ resource "github_repository_ruleset" "rs" {
 	assertNotContains(t, out, "bypass_actors")
 }
 
+func TestEmptyNestedListAttrClearsToEmpty(t *testing.T) {
+	// Regression (repo-configs run 29230872378): infra had no
+	// required_status_checks.contexts, but config listed one. drift-fixer only
+	// synced strict and skipped the empty contexts list, leaving perpetual
+	// drift. A nested scalar list attr empty in infra must be cleared to [].
+	input := `
+resource "github_branch_protection" "v6_0" {
+  required_status_checks {
+    strict   = true
+    contexts = ["FF Merge Status Check"]
+  }
+}
+`
+	out := applyDriftToString(t, input, "github_branch_protection", "v6_0",
+		map[string]interface{}{
+			"required_status_checks": []interface{}{
+				map[string]interface{}{
+					"strict":   true,
+					"contexts": []interface{}{},
+				},
+			},
+		})
+
+	assertContains(t, out, "contexts = []")
+	assertNotContains(t, out, "FF Merge Status Check")
+}
+
 func TestEmptyListNoBlocksIsNoop(t *testing.T) {
 	// Empty list from plan when no config blocks exist = no-op (not a scalar attr).
 	input := `

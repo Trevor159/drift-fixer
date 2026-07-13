@@ -143,7 +143,8 @@ func syncBody(body *hclwrite.Body, attrs map[string]interface{}, ctx syncCtx, in
 		// Empty slice: could be "zero-instance block type" (infra deleted all
 		// instances) OR a scalar list attribute being set to empty.
 		// We disambiguate below: if existing config blocks of this type exist,
-		// remove them. Otherwise skip (it's just an unset scalar list).
+		// remove them; else if a scalar list attribute of this name exists,
+		// clear it to []; otherwise skip (it's just an unset scalar list).
 		if lst, ok := val.([]interface{}); ok && len(lst) == 0 {
 			existing := blocksOfType(body, key)
 			if len(existing) > 0 {
@@ -154,8 +155,19 @@ func syncBody(body *hclwrite.Body, attrs map[string]interface{}, ctx syncCtx, in
 					}
 					changed = true
 				}
+			} else if path != "" && body.GetAttribute(key) != nil {
+				// Scalar list attribute nested inside a block, present in config
+				// but empty in infra — clear it so config matches real infra
+				// (e.g. required_status_checks.contexts = []). Only done for
+				// nested attrs; top-level lists like topics are intentionally
+				// left untouched when empty (see TestTopicsListBecomesEmpty).
+				body.SetAttributeValue(key, cty.ListValEmpty(cty.String))
+				if ctx.verbose {
+					fmt.Printf("%s[attr] cleared %s = [] (empty in infra)\n", indent, key)
+				}
+				changed = true
 			}
-			// If no existing blocks, nothing to do — skip writing `= []`
+			// If neither exists, nothing to do — skip writing `= []`
 			continue
 		}
 		if isBlockValue(val) {
